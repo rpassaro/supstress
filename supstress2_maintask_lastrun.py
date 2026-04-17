@@ -44,7 +44,10 @@ from itertools import permutations
 
 # Set participant number
 # Need this to create a folder with each subject's design matrix
-participant_number = "test"  # In PsychoPy: expInfo['participant']
+# participant_number is set to a temporary default here because this
+# "Before Experiment" code runs before the participant dialog.
+# It gets overridden with the real participant ID after the dialog (see __main__).
+participant_number = "test"
 
 # Set directory path robustly
 try:
@@ -216,7 +219,7 @@ def runs_feasible_for_no_dupes(mainTask_df):
                 return False, (r, cat, needed, main_pool_sizes[cat])
     return True, None
 
-max_attempts = 2000
+max_attempts = 10000  # increased from 2000 for tighter image pool margins
 attempt = 0
 
 feasible, info = runs_feasible_for_no_dupes(mainTask_df)
@@ -382,12 +385,58 @@ for run_num in range(1, num_runs + 1):
 
 print("Assigned encode/probe images run-by-run with no duplicated ENCODE images within each run.")
 
+# --- FIX: Add probe_subtype column so the Probe routine can determine correct_ans ---
+# The Probe routine checks probe_subtype (text), not probe_type (numeric).
+_probe_subtype_map = {0: "cued", 1: "uncued", 2: "novel_samecatcued", 3: "novel_samecatuncued"}
+mainTask_df["probe_subtype"] = mainTask_df["probe_type"].astype(int).map(_probe_subtype_map)
+
 # Save the final mainTask_df to the subject's main_task folder
 mainTask_df_outfile = os.path.join(phase_folder_path, "main_stim_list.csv")
 mainTask_df.to_csv(mainTask_df_outfile, index=False)
 
 stim_list = mainTask_df_outfile
 print("Saved stim list to:", stim_list)
+
+# ==== PRE-FLIGHT IMAGE VALIDATION ====
+# Verify every image referenced in the generated stim list exists on disk BEFORE
+# the experiment starts. This prevents mid-trial crashes when a path is bad or
+# when a file is missing (e.g. iCloud-evicted on macOS Desktop sync).
+# Also force-reads each image so any cloud-synced placeholders get materialized.
+print("Running pre-flight image check on main stim list...")
+_all_imgs = set()
+for _col in ("encode_1_img", "encode_2_img", "probe_img"):
+    _all_imgs.update(mainTask_df[_col].dropna().tolist())
+# Also include the practice list + cues + instruction images
+_practice_csv = os.path.join(_thisDir, "stimuli", "csvs", "maintask_stimlists", "prac_stim_lists.csv")
+if os.path.exists(_practice_csv):
+    _prac = pd.read_csv(_practice_csv)
+    for _col in ("encode_1_img", "encode_2_img", "probe_img"):
+        if _col in _prac.columns:
+            _all_imgs.update(_prac[_col].dropna().tolist())
+_all_imgs.update([
+    os.path.join("stimuli", "cues", "suppress.png"),
+    os.path.join("stimuli", "cues", "maintain.png"),
+])
+_missing = []
+for _p in _all_imgs:
+    _abs = _p if os.path.isabs(_p) else os.path.join(_thisDir, _p)
+    if not os.path.exists(_abs):
+        _missing.append(_p)
+        continue
+    # Force the OS to materialize file (for iCloud / network drives) by reading a byte.
+    try:
+        with open(_abs, "rb") as _fh:
+            _fh.read(1)
+    except OSError as _e:
+        _missing.append(f"{_p} (unreadable: {_e})")
+if _missing:
+    _msg = (
+        f"Pre-flight image check FAILED. {len(_missing)} image(s) missing or unreadable.\n"
+        f"First few: {_missing[:10]}\n"
+        "Fix the stim list CSVs (or un-evict iCloud files with `brctl download`) before running."
+    )
+    raise FileNotFoundError(_msg)
+print(f"Pre-flight OK: {len(_all_imgs)} unique image paths verified and pre-loaded.")
 # --- Setup global variables (available in all functions) ---
 # create a device manager to handle hardware (keyboards, mice, mirophones, speakers, etc.)
 deviceManager = hardware.DeviceManager()
@@ -3876,7 +3925,7 @@ def run(expInfo, thisExp, win, globalClock=None, thisSession=None):
         method='sequential', 
         extraInfo=expInfo, 
         originPath=-1, 
-        trialList=data.importConditions('subject lists/sub-test/main_task/main_stim_list.csv'), 
+        trialList=data.importConditions(stim_list),  # uses dynamically generated path 
         seed=None, 
         isTrials=True, 
     )
@@ -5046,7 +5095,12 @@ def run(expInfo, thisExp, win, globalClock=None, thisSession=None):
                 # if rest_welcome is active this frame...
                 if rest_welcome.status == STARTED:
                     # update params
-                    rest_welcome.setText(f"Great job completing the run! You have completed {run_num} out of 4 runs. You may now take a {30 - t:.0f} second break!", log=False)
+                    # --- FIX: prevent negative countdown; show "press SPACE" after 30s ---
+                    _rest_secs = max(0, 30 - t)
+                    if _rest_secs > 0:
+                        rest_welcome.setText(f"Great job completing the run! You have completed {run_num} out of 4 runs. You may now take a {_rest_secs:.0f} second break!", log=False)
+                    else:
+                        rest_welcome.setText(f"Great job completing the run! You have completed {run_num} out of 4 runs.\n\nPress SPACE when you are ready to continue.", log=False)
                 
                 # if rest_welcome is stopping this frame...
                 if rest_welcome.status == STARTED:
@@ -5083,8 +5137,8 @@ def run(expInfo, thisExp, win, globalClock=None, thisSession=None):
                 
                 # if rest_continue is stopping this frame...
                 if rest_continue.status == STARTED:
-                    # is it time to stop? (based on local clock)
-                    if tThisFlip > 30-frameTolerance:
+                    # --- FIX: allow SPACE from 20s all the way to 180s (was stopping at 30s) ---
+                    if tThisFlip > 180-frameTolerance:
                         # keep track of stop time/frame for later
                         rest_continue.tStop = t  # not accounting for scr refresh
                         rest_continue.tStopRefresh = tThisFlipGlobal  # on global time
@@ -5563,6 +5617,17 @@ def quit(thisExp, win=None, thisSession=None):
 if __name__ == '__main__':
     # call all functions in order
     expInfo = showExpInfoDlg(expInfo=expInfo)
+
+    # --- FIX: Re-save stim list with real participant ID (init_code ran before dialog) ---
+    participant_number = expInfo['participant'] or 'test'
+    list_foldername = os.path.join(_thisDir, "subject lists", f"sub-{participant_number}")
+    phase_folder_path = os.path.join(list_foldername, "main_task")
+    os.makedirs(phase_folder_path, exist_ok=True)
+    mainTask_df_outfile = os.path.join(phase_folder_path, "main_stim_list.csv")
+    mainTask_df.to_csv(mainTask_df_outfile, index=False)
+    stim_list = mainTask_df_outfile
+    print(f"Stim list saved for participant '{participant_number}': {stim_list}")
+
     thisExp = setupData(expInfo=expInfo)
     logFile = setupLogging(filename=thisExp.dataFileName)
     win = setupWindow(expInfo=expInfo)
