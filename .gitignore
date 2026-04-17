@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+__MACOSX/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Stimuli (static, huge — copy manually across machines)
+stimuli/
+
+# Participant data (keep local, not in public repo)
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
